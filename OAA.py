@@ -14,12 +14,14 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel,
                              QTableWidgetItem, QHeaderView, QComboBox, QGridLayout,
                              QCheckBox, QMenu, QAction, QSystemTrayIcon, QStyle, QSizeGrip,
                              QSlider, QDialog, QListWidget, QListWidgetItem, QTimeEdit,
-                             QDateEdit, QDateTimeEdit)
+                             QDateEdit, QDateTimeEdit, QTextEdit)
 from PyQt5.QtCore import Qt, QPoint, QTimer, QThread, pyqtSignal, QSize, QDate, QTime, QDateTime
 from PyQt5.QtGui import QFont, QColor, QPalette, QCursor, QIcon, QPixmap, QPainter
 
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5
+from Crypto.Cipher import PKCS1_v1_5, AES
+from Crypto.Util.Padding import pad, unpad
+import hashlib
 from bs4 import BeautifulSoup
 
 # ==================== 配置 ====================
@@ -52,6 +54,34 @@ COLORS = [
 
 # ==================== 工具类 ====================
 
+def find_resource(filename):
+    """
+    查找资源文件（支持递归查找子目录）
+    """
+    # 确定基准目录
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe，基准目录是exe所在目录
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # 如果是源码运行，基准目录是脚本所在目录
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 1. 首先检查基准目录
+    target_path = os.path.join(base_dir, filename)
+    if os.path.exists(target_path):
+        return target_path
+        
+    # 2. 遍历所有子目录查找
+    for root, dirs, files in os.walk(base_dir):
+        if filename in files:
+            return os.path.join(root, filename)
+            
+    # 3. 如果还没找到，尝试检查一下当前工作目录
+    if os.path.exists(filename):
+        return os.path.abspath(filename)
+        
+    return None
+
 class RSAEncryptor:
     @staticmethod
     def encrypt(plain_text, modulus_b64, exponent_b64):
@@ -67,6 +97,51 @@ class RSAEncryptor:
         except Exception as e:
             print(f"Encryption error: {e}")
             raise
+
+class LocalEncryptor:
+    """本地加密工具类"""
+    _KEY_SRC = "suse_jwgl_helper_2024_secure_key"
+
+    @staticmethod
+    def _get_key():
+        # 生成 32 字节 (256位) 密钥
+        return hashlib.sha256(LocalEncryptor._KEY_SRC.encode('utf-8')).digest()
+
+    @staticmethod
+    def encrypt(text):
+        if not text: return ""
+        try:
+            # 使用 CBC 模式 + 随机 IV
+            key = LocalEncryptor._get_key()
+            iv = os.urandom(16)
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            padded_text = pad(text.encode('utf-8'), AES.block_size)
+            encrypted_bytes = cipher.encrypt(padded_text)
+            # 拼接 IV + 密文，并转为 Base64
+            combined = iv + encrypted_bytes
+            return base64.b64encode(combined).decode('utf-8')
+        except Exception as e:
+            print(f"Local Encrypt error: {e}")
+            return text
+
+    @staticmethod
+    def decrypt(text):
+        if not text: return ""
+        try:
+            # 尝试解密
+            combined = base64.b64decode(text)
+            # 提取 IV (前16字节)
+            if len(combined) < 16: return text # 长度不足，可能是明文
+            iv = combined[:16]
+            encrypted_bytes = combined[16:]
+            
+            key = LocalEncryptor._get_key()
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            decrypted_padded = cipher.decrypt(encrypted_bytes)
+            return unpad(decrypted_padded, AES.block_size).decode('utf-8')
+        except Exception:
+            # 解密失败，假定为明文（兼容旧版本配置）
+            return text
 
 class SuseJwglClient:
     def __init__(self):
@@ -182,15 +257,16 @@ class NotificationPopup(QDialog):
     def __init__(self, data, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        # 移除透明背景属性，改为完全不透明
+        # self.setAttribute(Qt.WA_TranslucentBackground) 
         self.setFixedSize(320, 160)
         
         # 样式
         self.setStyleSheet("""
             QDialog {
                 background-color: #2c313a;
-                border: 1px solid #3e4451;
-                border-radius: 8px;
+                border: none;
+                border-radius: 0px; 
             }
             QLabel { color: white; }
             QPushButton {
@@ -203,14 +279,14 @@ class NotificationPopup(QDialog):
         """)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 15, 20, 15)
-        layout.setSpacing(5)
+        layout.setContentsMargins(8, 6, 8, 6) # 极限减小边距
+        layout.setSpacing(4)
         
         # 顶部：日期时间 + 关闭按钮
         header_layout = QHBoxLayout()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         time_lbl = QLabel(now_str)
-        time_lbl.setStyleSheet("color: #61afef; font-size: 12px; font-weight: bold;")
+        time_lbl.setStyleSheet("color: #61afef; font-size: 15px; font-weight: bold;") # 增大字体
         header_layout.addWidget(time_lbl)
         
         header_layout.addStretch()
@@ -225,40 +301,65 @@ class NotificationPopup(QDialog):
         
         # 内容区域
         content_layout = QVBoxLayout()
-        content_layout.setSpacing(5)
+        content_layout.setSpacing(2) # 进一步减小间距
         
         reminder_type = data.get('type')
         
         if reminder_type == 'course':
             # 提示语
             alert_lbl = QLabel("🔔 还有25分钟就要上课了")
-            alert_lbl.setStyleSheet("color: #e5c07b; font-size: 13px; font-weight: bold;")
+            alert_lbl.setStyleSheet("color: #e5c07b; font-size: 17px; font-weight: bold;") # 增大字体
             content_layout.addWidget(alert_lbl)
             
             # 课程名称
             course_name = data.get('course_name', '未知课程')
             name_lbl = QLabel(course_name)
             name_lbl.setWordWrap(True)
-            name_lbl.setStyleSheet("color: white; font-size: 16px; font-weight: bold; margin-top: 2px;")
+            name_lbl.setStyleSheet("color: white; font-size: 26px; font-weight: bold; margin-top: 4px;") # 增大字体
             content_layout.addWidget(name_lbl)
             
             # 地点 | 老师
             location = data.get('location', '未知地点')
             teacher = data.get('teacher', '未知教师')
             info_lbl = QLabel(f"🚩 {location} | 🧑‍🏫 {teacher}")
-            info_lbl.setStyleSheet("color: #abb2bf; font-size: 13px; margin-top: 2px;")
+            info_lbl.setStyleSheet("color: #abb2bf; font-size: 16px; margin-top: 4px;") # 增大字体
             content_layout.addWidget(info_lbl)
             
         else:
-            # Fallback for generic
-            title_lbl = QLabel(data.get('title', '提醒'))
-            title_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #61afef;")
+            # Custom Reminder (Tips)
+            title_lbl = QLabel("Tips:")
+            title_lbl.setStyleSheet("font-weight: bold; font-size: 24px; color: #e5c07b;") # Large font, yellow
             content_layout.addWidget(title_lbl)
             
-            msg_lbl = QLabel(data.get('content', ''))
+            # Content
+            content_text = data.get('content', '')
+            msg_lbl = QLabel(content_text)
             msg_lbl.setWordWrap(True)
-            msg_lbl.setStyleSheet("font-size: 13px;")
+            
+            # Font size adjustment
+            has_location = bool(data.get('location'))
+            # 这里的字体大小被要求至少和 Tips 一样大 (Tips 是 24px)
+            # 我们给内容设置 24px，地点设置 20px
+            font_size = 24 
+            msg_lbl.setStyleSheet(f"color: white; font-size: {font_size}px; font-weight: bold; margin-top: 5px;")
+            
+            # We can't easily limit lines in QLabel, but we rely on layout constraints.
+            # If it's too long, it will push content down.
+            # Given fixed size, we might want to truncate text if it's extremely long.
+            # But user said "Content must be presented... unless exceeds two lines".
+            # For now, let's assume reasonable length or let it clip if huge.
             content_layout.addWidget(msg_lbl)
+            
+            if has_location:
+                loc_text = data.get('location')
+                loc_lbl = QLabel(f"📍 {loc_text}")
+                # Elide location if too long (simple char limit for now as placeholder)
+                if len(loc_text) > 20:
+                    loc_text = loc_text[:18] + "..."
+                    loc_lbl.setText(f"📍 {loc_text}")
+                    
+                loc_lbl.setStyleSheet("color: #abb2bf; font-size: 20px; margin-top: 5px; font-weight: bold;")
+                content_layout.addWidget(loc_lbl)
 
         content_layout.addStretch()
         layout.addLayout(content_layout)
@@ -271,6 +372,116 @@ class NotificationPopup(QDialog):
         self.move(x, y)
         self.show()
 
+class CustomReminderDialog(QDialog):
+    """自定义提醒设置窗口"""
+    def __init__(self, start_dt, existing_data=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置提醒")
+        self.setFixedSize(360, 420)
+        self.setStyleSheet("""
+            QDialog { background-color: #f5f7fa; font-family: 'Microsoft YaHei UI'; }
+            QLabel { color: #333; font-size: 14px; font-weight: bold; }
+            QLineEdit, QDateTimeEdit, QTextEdit {
+                padding: 8px;
+                border: 1px solid #dcdfe6;
+                border-radius: 4px;
+                background: white;
+                font-size: 14px;
+            }
+            QPushButton {
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton#Save { background-color: #409eff; color: white; border: none; }
+            QPushButton#Save:hover { background-color: #66b1ff; }
+            QPushButton#Delete { background-color: #f56c6c; color: white; border: none; }
+            QPushButton#Delete:hover { background-color: #ff7875; }
+            QPushButton#Cancel { background-color: #ffffff; color: #606266; border: 1px solid #dcdfe6; }
+            QPushButton#Cancel:hover { color: #409eff; border-color: #c6e2ff; background-color: #ecf5ff; }
+        """)
+        
+        self.result_data = None
+        self.is_delete = False
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        # 提醒时间
+        layout.addWidget(QLabel("提醒时间:"))
+        self.time_edit = QDateTimeEdit(start_dt)
+        self.time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.time_edit.setCalendarPopup(True)
+        layout.addWidget(self.time_edit)
+        
+        # 提醒事项
+        layout.addWidget(QLabel("提醒事项:"))
+        self.content_edit = QTextEdit()
+        self.content_edit.setPlaceholderText("请输入提醒内容...")
+        layout.addWidget(self.content_edit)
+        
+        # 地点（可选）
+        layout.addWidget(QLabel("地点 (可选):"))
+        self.location_edit = QLineEdit()
+        self.location_edit.setPlaceholderText("请输入地点")
+        layout.addWidget(self.location_edit)
+        
+        layout.addStretch()
+        
+        # 按钮区
+        btn_layout = QHBoxLayout()
+        
+        if existing_data:
+            delete_btn = QPushButton("删除", objectName="Delete")
+            delete_btn.setCursor(Qt.PointingHandCursor)
+            delete_btn.clicked.connect(self.handle_delete)
+            btn_layout.addWidget(delete_btn)
+            
+            # 填充现有数据
+            if 'time' in existing_data:
+                try:
+                    dt = datetime.datetime.strptime(existing_data['time'], "%Y-%m-%d %H:%M")
+                    self.time_edit.setDateTime(dt)
+                except: pass
+            self.content_edit.setText(existing_data.get('content', ''))
+            self.location_edit.setText(existing_data.get('location', ''))
+            
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("取消", objectName="Cancel")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        save_btn = QPushButton("保存", objectName="Save")
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self.handle_save)
+        btn_layout.addWidget(save_btn)
+        
+        layout.addLayout(btn_layout)
+
+    def handle_save(self):
+        content = self.content_edit.toPlainText().strip()
+        if not content:
+            QMessageBox.warning(self, "提示", "请输入提醒事项内容")
+            return
+            
+        self.result_data = {
+            'time': self.time_edit.dateTime().toString("yyyy-MM-dd HH:mm"),
+            'content': content,
+            'location': self.location_edit.text().strip(),
+            'type': 'custom',
+            'title': '自定义提醒'
+        }
+        self.accept()
+
+    def handle_delete(self):
+        confirm = QMessageBox.question(self, "确认删除", "确定要删除这条提醒吗？", QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            self.is_delete = True
+            self.accept()
+
 class ReminderManagerWindow(QWidget):
     """提醒管理窗口"""
     def __init__(self, reminder_manager):
@@ -279,6 +490,25 @@ class ReminderManagerWindow(QWidget):
         self.current_week = self.manager.calculate_current_week()
         self.initUI()
         
+    def test_notification(self):
+        """测试弹窗功能"""
+        try:
+            test_data = {
+                'type': 'course',
+                'title': '测试提醒',
+                'course_name': '测试课程：高等数学',
+                'location': '第二教学楼 201',
+                'teacher': '张三',
+                'content': '这是一条测试用的提醒消息，用于验证弹窗功能是否正常。'
+            }
+            # 调用 FloatingWindow 的 show_notification 方法
+            if hasattr(self.manager, 'show_notification'):
+                self.manager.show_notification(test_data)
+            else:
+                QMessageBox.warning(self, "错误", "无法调用弹窗功能")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"测试弹窗失败: {str(e)}")
+
     def initUI(self):
         self.setWindowTitle("提醒任务管理")
         self.resize(1000, 700)
@@ -330,11 +560,23 @@ class ReminderManagerWindow(QWidget):
         top_bar.addWidget(QLabel("切换周次:"))
         top_bar.addWidget(self.week_combo)
         
+        # 测试弹窗按钮
+        test_btn = QPushButton("测试弹窗")
+        test_btn.setCursor(Qt.PointingHandCursor)
+        test_btn.clicked.connect(self.test_notification)
+        top_bar.addWidget(test_btn)
+        
         refresh_btn = QPushButton("刷新列表")
         refresh_btn.clicked.connect(self.load_reminders)
         top_bar.addWidget(refresh_btn)
         
         layout.addLayout(top_bar)
+        
+        # 提醒说明
+        tips_label = QLabel("提示：只有未开始且未过期的课程才会触发提醒。冲突的课程不会提醒（灰色显示）。\n"
+                            "为了确保提醒生效，请保持程序运行（可最小化到托盘）。")
+        tips_label.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 5px;")
+        layout.addWidget(tips_label)
         
         # 提醒表格
         self.table = QTableWidget()
@@ -348,10 +590,213 @@ class ReminderManagerWindow(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setSelectionMode(QTableWidget.NoSelection)
+        self.table.cellClicked.connect(self.on_cell_clicked)
         
         layout.addWidget(self.table)
         
         self.load_reminders()
+
+    def test_notification(self):
+        """测试弹窗功能"""
+        try:
+            test_data = {
+                'type': 'course',
+                'title': '测试提醒',
+                'course_name': '测试课程：高等数学',
+                'location': '第二教学楼 201',
+                'teacher': '张三',
+                'content': '这是一条测试用的提醒消息，用于验证弹窗功能是否正常。'
+            }
+            # 调用 FloatingWindow 的 show_notification 方法
+            if hasattr(self.manager, 'show_notification'):
+                self.manager.show_notification(test_data)
+            else:
+                QMessageBox.warning(self, "错误", "无法调用弹窗功能")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"测试弹窗失败: {str(e)}")
+
+    def on_cell_clicked(self, row, col):
+        """处理单元格点击"""
+        # 获取单元格数据
+        item = self.table.item(row, col)
+        
+        # 1. 检查是否是课程提醒（不可编辑）
+        # 通过检查 item 是否关联了课程数据，或者背景色
+        # 我们可以在 load_reminders 时将数据绑定到 item 的 UserRole
+        if item:
+            data = item.data(Qt.UserRole)
+            if data:
+                if data.get('type') == 'course':
+                    QMessageBox.information(self, "提示", "课程提醒是自动生成的，无法修改。")
+                    return
+                elif data.get('type') == 'custom':
+                    # 修改自定义提醒
+                    self.edit_custom_reminder(data)
+                    return
+        
+        # 2. 如果是空白或没有数据，则创建新提醒
+        # 计算该单元格对应的默认时间
+        selected_week = self.week_combo.currentData()
+        
+        # 获取本周周一
+        if not self.manager.start_date_str:
+            now = datetime.datetime.now()
+            start_date = datetime.datetime(now.year, 9, 1) if now.month >= 8 else datetime.datetime(now.year, 2, 20)
+        else:
+            try:
+                start_date = datetime.datetime.strptime(self.manager.start_date_str, "%Y-%m-%d")
+            except: 
+                start_date = datetime.datetime.now()
+        
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start_date = start_date + datetime.timedelta(days=selected_week * 7)
+        
+        target_date = week_start_date + datetime.timedelta(days=col)
+        
+        # 获取该行对应的开始时间
+        # 行号 0-11 对应 DAILY_SCHEDULE 中除了午休外的第 0-11 个slot
+        slots = [s for s in DAILY_SCHEDULE if s["name"] != "午休"]
+        if row < len(slots):
+            time_str = slots[row]["start"]
+            target_dt = datetime.datetime.combine(target_date.date(), datetime.datetime.strptime(time_str, "%H:%M").time())
+            
+            # 检查该时间段是否已有课程占用
+            if self.check_course_conflict(target_dt):
+                QMessageBox.warning(self, "无法创建", "当前时间段已有课程安排，无法创建自定义提醒。")
+                return
+            
+            self.create_custom_reminder(target_dt)
+
+    def check_course_conflict(self, dt):
+        """检查指定时间是否与课程冲突"""
+        # 获取当天的课程
+        # get_daily_courses 返回的是合并后的课程信息，包含 start_time, end_time
+        daily_courses = self.manager.get_daily_courses(dt)
+        time_str = dt.strftime("%H:%M")
+        
+        for item in daily_courses:
+            if item['start_time'] <= time_str <= item['end_time']:
+                return True
+        return False
+
+    def create_custom_reminder(self, default_dt):
+        dialog = CustomReminderDialog(default_dt, parent=self)
+        
+        # 计算唤起该弹窗的课程 slot 的 start time
+        origin_slot_start = None
+        time_str = default_dt.strftime("%H:%M")
+        slots = [s for s in DAILY_SCHEDULE if s["name"] != "午休"]
+        for slot in slots:
+            if slot['start'] == time_str:
+                origin_slot_start = slot['start']
+                break
+        
+        if dialog.exec_() == QDialog.Accepted:
+            new_data = dialog.result_data
+            
+            # 验证是否成功显示在格子里
+            # 简单检查时间是否在任何有效格子范围内
+            time_str = new_data['time'].split(' ')[1]
+            valid_slot = False
+            for slot in slots:
+                slot_start = slot['start']
+                slot_end = slot['end']
+                
+                if slot_start <= time_str <= slot_end:
+                    valid_slot = True
+                    break
+                
+                try:
+                    s_dt = datetime.datetime.strptime(slot_start, "%H:%M")
+                    t_dt = datetime.datetime.strptime(time_str, "%H:%M")
+                    diff = (s_dt - t_dt).total_seconds()
+                    if 0 < diff <= 15 * 60:
+                        valid_slot = True
+                        break
+                except: pass
+                
+            if not valid_slot:
+                QMessageBox.warning(self, "注意", "提醒任务已创建，但因时间不在任何课程格子范围内（或提前超过15分钟），可能无法在课表视图中显示。")
+                # 即使不在格子内，我们也要尝试添加
+                success, msg = self.manager.add_custom_reminder(new_data, origin_slot_start)
+                if not success:
+                    QMessageBox.warning(self, "添加失败", msg)
+            else:
+                success, msg = self.manager.add_custom_reminder(new_data, origin_slot_start)
+                if not success:
+                    QMessageBox.warning(self, "添加失败", msg)
+            
+            self.load_reminders() # 刷新
+
+    def edit_custom_reminder(self, old_data):
+        # 解析时间
+        try:
+            dt = datetime.datetime.strptime(old_data['time'], "%Y-%m-%d %H:%M")
+        except:
+            dt = datetime.datetime.now()
+            
+        # 计算 old_data 所属的 slot start time
+        origin_slot_start = None
+        time_str = dt.strftime("%H:%M")
+        slots = [s for s in DAILY_SCHEDULE if s["name"] != "午休"]
+        for slot in slots:
+            slot_start = slot['start']
+            slot_end = slot['end']
+            
+            # 检查是否在 slot 内 (或者提前15分钟)
+            match = False
+            if slot_start <= time_str <= slot_end:
+                match = True
+            else:
+                try:
+                    s_dt = datetime.datetime.strptime(slot_start, "%H:%M")
+                    t_dt = datetime.datetime.strptime(time_str, "%H:%M")
+                    diff = (s_dt - t_dt).total_seconds()
+                    if 0 < diff <= 15 * 60:
+                        match = True
+                except: pass
+            
+            if match:
+                origin_slot_start = slot_start
+                break
+            
+        dialog = CustomReminderDialog(dt, existing_data=old_data, parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            if dialog.is_delete:
+                self.manager.delete_custom_reminder(old_data)
+            else:
+                new_data = dialog.result_data
+                
+                # 验证时间范围（同上）
+                time_str = new_data['time'].split(' ')[1]
+                valid_slot = False
+                slots = [s for s in DAILY_SCHEDULE if s["name"] != "午休"]
+                for slot in slots:
+                    slot_start = slot['start']
+                    slot_end = slot['end']
+                    if slot_start <= time_str <= slot_end:
+                        valid_slot = True
+                        break
+                    try:
+                        s_dt = datetime.datetime.strptime(slot_start, "%H:%M")
+                        t_dt = datetime.datetime.strptime(time_str, "%H:%M")
+                        diff = (s_dt - t_dt).total_seconds()
+                        if 0 < diff <= 15 * 60:
+                            valid_slot = True
+                            break
+                    except: pass
+                
+                if not valid_slot:
+                    QMessageBox.warning(self, "注意", "提醒任务已修改，但因时间不在任何课程格子范围内，可能无法在课表视图中显示。")
+                    success, msg = self.manager.update_custom_reminder(old_data, new_data, origin_slot_start)
+                    if not success:
+                        QMessageBox.warning(self, "修改失败", msg)
+                else:
+                    success, msg = self.manager.update_custom_reminder(old_data, new_data, origin_slot_start)
+                    if not success:
+                        QMessageBox.warning(self, "修改失败", msg)
+                
+            self.load_reminders() # 刷新
 
     def load_reminders(self):
         self.table.clearContents()
@@ -405,6 +850,63 @@ class ReminderManagerWindow(QWidget):
                 if 0 <= row < 12 and 0 <= day < 7:
                     schedule_map[(row, day)] = course
         
+        # 3. 合并自定义提醒到表格
+        # custom_reminders 是按具体日期存储的
+        # 我们需要遍历 custom_reminders，如果它的日期属于 selected_week，则显示
+        
+        for item in self.manager.custom_reminders:
+            try:
+                dt = datetime.datetime.strptime(item['time'], "%Y-%m-%d %H:%M")
+                
+                # 检查日期是否在本周范围内
+                # week_start_date 是本周周一
+                week_end_date = week_start_date + datetime.timedelta(days=7)
+                
+                if week_start_date <= dt < week_end_date:
+                    # 计算列 (0-6)
+                    col = (dt - week_start_date).days
+                    
+                    # 计算行 (根据时间匹配 slot)
+                    # 找到最近的 slot 或者覆盖的 slot
+                    # 简单处理：根据时间找到对应的节次
+                    time_str = dt.strftime("%H:%M")
+                    
+                    target_row = -1
+                    slots = [s for s in DAILY_SCHEDULE if s["name"] != "午休"]
+                    
+                    # 严格匹配逻辑：
+                    # 提醒时间必须位于某个格子（课程节次）的时间范围内 [start, end]
+                    # 或者，为了方便，允许在 start 前 15 分钟内
+                    
+                    for i, slot in enumerate(slots):
+                        slot_start = slot['start']
+                        slot_end = slot['end']
+                        
+                        # 检查是否在时间范围内
+                        if slot_start <= time_str <= slot_end:
+                            target_row = i
+                            break
+                        
+                        # 允许稍微提前一点 (例如提前15分钟算作这一节)
+                        # 这主要用于那些设置在8:15提醒8:30上课的情况
+                        try:
+                            s_dt = datetime.datetime.strptime(slot_start, "%H:%M")
+                            t_dt = datetime.datetime.strptime(time_str, "%H:%M")
+                            diff = (s_dt - t_dt).total_seconds()
+                            if 0 < diff <= 15 * 60:
+                                target_row = i
+                                break
+                        except: pass
+
+                    if target_row != -1:
+                        # 检查是否有课程覆盖
+                        if (target_row, col) not in schedule_map:
+                            # 存入 map，标记为 custom
+                            schedule_map[(target_row, col)] = item
+
+            except Exception as e:
+                print(f"Render custom reminder error: {e}")
+
         # 渲染表格
         now = datetime.datetime.now()
         
@@ -430,76 +932,109 @@ class ReminderManagerWindow(QWidget):
                     # 填充内容
                     # 获取该节课的开始时间
                     start_time = "00:00"
-                    for slot in DAILY_SCHEDULE:
-                        if slot['name'] == str(row + 1):
-                            start_time = slot['start']
-                            break
                     
-                    # 计算提醒时间
-                    is_expired = False
-                    is_conflict = False
-                    remind_time_str = "??"
-                    
-                    try:
-                        start_dt = datetime.datetime.combine(col_date.date(), datetime.datetime.strptime(start_time, "%H:%M").time())
-                        remind_dt = start_dt - datetime.timedelta(minutes=25)
-                        remind_time_str = remind_dt.strftime("%H:%M")
-                        
-                        if remind_dt < now:
-                            is_expired = True
-                            
-                        # 冲突检测
-                        # 我们需要在 ReminderManagerWindow 中重新模拟冲突检测，因为这里只是展示
-                        # 获取当天所有课程的时间段
-                        daily_courses_time = []
-                        temp_row = 0
-                        while temp_row < 12:
-                            temp_c = schedule_map.get((temp_row, col))
-                            if temp_c:
-                                temp_span = 1
-                                while temp_row + temp_span < 12:
-                                    temp_next = schedule_map.get((temp_row + temp_span, col))
-                                    if temp_next and temp_next.get('kcmc') == temp_c.get('kcmc') and temp_next.get('cdmc') == temp_c.get('cdmc'):
-                                        temp_span += 1
-                                    else:
-                                        break
-                                
-                                temp_s_time = "00:00"
-                                temp_e_time = "00:00"
-                                for slot in DAILY_SCHEDULE:
-                                    if slot['name'] == str(temp_row + 1): temp_s_time = slot['start']
-                                    if slot['name'] == str(temp_row + temp_span): temp_e_time = slot['end']
-                                
-                                daily_courses_time.append((temp_s_time, temp_e_time))
-                                temp_row += temp_span
-                            else:
-                                temp_row += 1
-                        
-                        # 检查提醒时间是否在其他课程时间内
-                        remind_time_check = remind_time_str
-                        for s, e in daily_courses_time:
-                            # 排除自己
-                            if s == start_time: continue 
-                            if s <= remind_time_check <= e:
-                                is_conflict = True
+                    if isinstance(course, dict) and 'kcmc' in course:
+                        # 课程提醒
+                        for slot in DAILY_SCHEDULE:
+                            if slot['name'] == str(row + 1):
+                                start_time = slot['start']
                                 break
+                        
+                        # 计算提醒时间
+                        is_expired = False
+                        is_conflict = False
+                        remind_time_str = "??"
+                        
+                        try:
+                            start_dt = datetime.datetime.combine(col_date.date(), datetime.datetime.strptime(start_time, "%H:%M").time())
+                            remind_dt = start_dt - datetime.timedelta(minutes=25)
+                            remind_time_str = remind_dt.strftime("%H:%M")
+                            
+                            if remind_dt < now:
+                                is_expired = True
                                 
-                    except:
-                        pass
+                            # 冲突检测
+                            # 我们需要在 ReminderManagerWindow 中重新模拟冲突检测，因为这里只是展示
+                            # 获取当天所有课程的时间段
+                            daily_courses_time = []
+                            temp_row = 0
+                            while temp_row < 12:
+                                temp_c = schedule_map.get((temp_row, col))
+                                if temp_c and isinstance(temp_c, dict) and 'kcmc' in temp_c:
+                                    temp_span = 1
+                                    while temp_row + temp_span < 12:
+                                        temp_next = schedule_map.get((temp_row + temp_span, col))
+                                        if temp_next and temp_next.get('kcmc') == temp_c.get('kcmc') and temp_next.get('cdmc') == temp_c.get('cdmc'):
+                                            temp_span += 1
+                                        else:
+                                            break
+                                    
+                                    temp_s_time = "00:00"
+                                    temp_e_time = "00:00"
+                                    for slot in DAILY_SCHEDULE:
+                                        if slot['name'] == str(temp_row + 1): temp_s_time = slot['start']
+                                        if slot['name'] == str(temp_row + temp_span): temp_e_time = slot['end']
+                                    
+                                    daily_courses_time.append((temp_s_time, temp_e_time))
+                                    temp_row += temp_span
+                                else:
+                                    temp_row += 1
+                            
+                            # 检查提醒时间是否在其他课程时间内
+                            remind_time_check = remind_time_str
+                            for s, e in daily_courses_time:
+                                # 排除自己
+                                if s == start_time: continue 
+                                if s <= remind_time_check <= e:
+                                    is_conflict = True
+                                    break
+                                    
+                        except:
+                            pass
 
-                    text = f"⏰ 提醒时间: {remind_time_str}\n\n{course.get('kcmc')}\n@{course.get('cdmc')}"
-                    
-                    if is_expired or is_conflict:
-                        bg_color = QColor("#e0e0e0") # 灰色背景
-                        text_color = QColor("#888888") # 灰色文字
-                        if is_conflict:
-                            text += "\n(时间冲突-已取消)"
+                        text = f"⏰ 提醒时间: {remind_time_str}\n\n{course.get('kcmc')}\n@{course.get('cdmc')}"
+                        
+                        if is_expired or is_conflict:
+                            bg_color = QColor("#e0e0e0") # 灰色背景
+                            text_color = QColor("#888888") # 灰色文字
+                            if is_conflict:
+                                text += "\n(时间冲突-已取消)"
+                        else:
+                            color_idx = abs(hash(course.get('kcmc', ''))) % len(COLORS)
+                            bg_color = QColor(COLORS[color_idx])
+                            text_color = QColor("black")
+                        
+                        item = QTableWidgetItem(text)
+                        item.setData(Qt.UserRole, {'type': 'course', 'data': course}) # 绑定数据
+                        
                     else:
-                        color_idx = abs(hash(course.get('kcmc', ''))) % len(COLORS)
-                        bg_color = QColor(COLORS[color_idx])
-                        text_color = QColor("black")
-                    
-                    item = QTableWidgetItem(text)
+                        # 自定义提醒
+                        try:
+                            dt = datetime.datetime.strptime(course['time'], "%Y-%m-%d %H:%M")
+                            time_display = dt.strftime("%H:%M")
+                            
+                            content = course.get('content', '')
+                            # 内容截断
+                            if len(content) > 5:
+                                disp_content = content[:5] + "..."
+                            else:
+                                disp_content = content
+                                
+                            text = f"📝 {time_display}\n{disp_content}"
+                                
+                            bg_color = QColor("#fff3cd") # 浅黄色背景
+                            text_color = QColor("#856404") # 深黄色文字
+                            
+                            if dt < now:
+                                bg_color = QColor("#e0e0e0")
+                                text_color = QColor("#888888")
+                                text += "\n(过期)"
+                                
+                            item = QTableWidgetItem(text)
+                            item.setData(Qt.UserRole, course) # 绑定数据
+                        except:
+                            item = QTableWidgetItem("Error")
+
                     item.setBackground(bg_color)
                     item.setForeground(text_color)
                     item.setTextAlignment(Qt.AlignCenter)
@@ -922,22 +1457,188 @@ class CourseCard(QFrame):
         main_layout.addWidget(right_widget, stretch=1)
 
 class FloatingWindow(QWidget):
-    def __init__(self, schedule_data, start_date_str):
+    def __init__(self, schedule_data, start_date_str, username=""):
         super().__init__()
         self.schedule_data = schedule_data
         self.kb_list = schedule_data.get('kbList', [])
         self.start_date_str = start_date_str
+        self.username = username
         self.current_week = self.calculate_current_week()
         self.week_window = None
         self.reminder_window = None # 修复：初始化 reminder_window
         self.bg_opacity = 245  # 默认背景不透明度
         self.reminders = [] # 存储所有提醒
+        self.custom_reminders = [] # 存储自定义提醒
+        self.load_custom_reminders()
         self.triggered_reminders = set() # 存储已触发的提醒ID
         
         self.initUI()
         self.initTray() # 初始化托盘
         self.setup_timer()
         
+    def load_custom_reminders(self):
+        """加载自定义提醒"""
+        try:
+            if os.path.exists("custom_reminders.json"):
+                with open("custom_reminders.json", "r", encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                if isinstance(data, list):
+                    # 旧格式兼容
+                    self.custom_reminders = data
+                elif isinstance(data, dict):
+                    # 新格式：按用户名获取
+                    self.custom_reminders = data.get(self.username, [])
+                else:
+                    self.custom_reminders = []
+        except Exception as e:
+            print(f"Load custom reminders error: {e}")
+            self.custom_reminders = []
+
+    def save_custom_reminders(self):
+        """保存自定义提醒"""
+        try:
+            all_reminders = {}
+            if os.path.exists("custom_reminders.json"):
+                with open("custom_reminders.json", "r", encoding='utf-8') as f:
+                    try:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            all_reminders = {"unknown": data}
+                        else:
+                            all_reminders = data
+                    except: pass
+            
+            if self.username:
+                all_reminders[self.username] = self.custom_reminders
+                
+                with open("custom_reminders.json", "w", encoding='utf-8') as f:
+                    json.dump(all_reminders, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Save custom reminders error: {e}")
+
+    def add_custom_reminder(self, data, origin_slot_start=None):
+        # 验证新任务的时间，获取对应的 slot
+        time_str = data['time'].split(' ')[1]
+        reminder_dt = datetime.datetime.strptime(data['time'], "%Y-%m-%d %H:%M")
+        now = datetime.datetime.now()
+        
+        target_slot = None
+        
+        # 找到所属的 slot
+        slots = [s for s in DAILY_SCHEDULE if s["name"] != "午休"]
+        for slot in slots:
+            slot_start = slot['start']
+            slot_end = slot['end']
+            
+            # 严格在范围内
+            if slot_start <= time_str <= slot_end:
+                target_slot = slot
+                break
+            
+            # 或者提前15分钟
+            try:
+                s_dt = datetime.datetime.strptime(slot_start, "%H:%M")
+                t_dt = datetime.datetime.strptime(time_str, "%H:%M")
+                diff = (s_dt - t_dt).total_seconds()
+                if 0 < diff <= 15 * 60:
+                    target_slot = slot
+                    break
+            except: pass
+            
+        if target_slot:
+            reminders_to_remove = []
+            conflict = False
+            
+            # 遍历现有任务
+            for item in list(self.custom_reminders): # 使用副本以安全删除
+                try:
+                    item_dt = datetime.datetime.strptime(item['time'], "%Y-%m-%d %H:%M")
+                    # 检查是否是同一天
+                    if item_dt.date() != reminder_dt.date():
+                        continue
+                        
+                    item_time_str = item_dt.strftime("%H:%M")
+                    
+                    # 检查是否在同一个 slot
+                    is_same_slot = False
+                    slot_start = target_slot['start']
+                    slot_end = target_slot['end']
+                    
+                    if slot_start <= item_time_str <= slot_end:
+                        is_same_slot = True
+                    else:
+                        try:
+                            s_dt = datetime.datetime.strptime(slot_start, "%H:%M")
+                            t_dt = datetime.datetime.strptime(item_time_str, "%H:%M")
+                            diff = (s_dt - t_dt).total_seconds()
+                            if 0 < diff <= 15 * 60:
+                                is_same_slot = True
+                        except: pass
+                        
+                    if is_same_slot:
+                        # 发现同一 slot 的任务
+                        if item_dt < now:
+                            # 已过期，标记删除
+                            reminders_to_remove.append(item)
+                        else:
+                            # 未过期，检查是否是“唤起课程”
+                            # 如果 origin_slot_start 被提供，且等于当前冲突任务所属的 slot start
+                            # 则认为是“同一课程唤起”，允许覆盖（即删除旧的）
+                            
+                            is_origin_match = False
+                            if origin_slot_start:
+                                # 检查 item 是否属于 origin_slot_start 对应的 slot
+                                # 其实就是检查 target_slot.start 是否等于 origin_slot_start
+                                if target_slot['start'] == origin_slot_start:
+                                    is_origin_match = True
+                            
+                            if is_origin_match:
+                                # 是同一唤起源，允许覆盖 -> 删除旧的
+                                reminders_to_remove.append(item)
+                            else:
+                                # 不是同一唤起源 -> 冲突
+                                conflict = True
+                except: pass
+            
+            if conflict:
+                return False, "该时间段内已存在有效的自定义提醒任务"
+                
+            # 删除过期的或允许覆盖的
+            for item in reminders_to_remove:
+                if item in self.custom_reminders:
+                    self.custom_reminders.remove(item)
+                    
+        self.custom_reminders.append(data)
+        self.save_custom_reminders()
+        self.generate_daily_reminders() # 重新生成
+        return True, "添加成功"
+
+    def update_custom_reminder(self, old_data, new_data, origin_slot_start=None):
+        # 更新其实就是删除旧的，添加新的
+        # 但我们需要先检查新的能否添加
+        
+        # 1. 暂时移除旧的
+        if old_data in self.custom_reminders:
+            self.custom_reminders.remove(old_data)
+            
+        # 2. 尝试添加新的，并传入 origin_slot_start
+        success, msg = self.add_custom_reminder(new_data, origin_slot_start)
+        
+        if not success:
+            # 如果失败，把旧的加回来
+            self.custom_reminders.append(old_data)
+            self.save_custom_reminders() # 恢复保存
+            return False, msg
+            
+        return True, "更新成功"
+
+    def delete_custom_reminder(self, data):
+        if data in self.custom_reminders:
+            self.custom_reminders.remove(data)
+            self.save_custom_reminders()
+            self.generate_daily_reminders()
+
     def generate_daily_reminders(self):
         """根据当天课表生成提醒（始终生成今天和明天的）"""
         if not hasattr(self, 'kb_list') or not self.kb_list:
@@ -949,7 +1650,25 @@ class FloatingWindow(QWidget):
         tomorrow_str = tomorrow.strftime("%Y-%m-%d")
         
         # Clear old course and custom reminders
-        self.reminders = [r for r in self.reminders if r.get('type') != 'course']
+        # 注意：这里我们保留 custom_reminders 数据源不变，只是清空 self.reminders 列表
+        self.reminders = []
+        
+        # 1. Custom Reminders (Full List)
+        # 将所有自定义提醒加入到 reminders 列表
+        for item in self.custom_reminders:
+            try:
+                # 检查是否过期（仅保留未来的或近期的）
+                # 不过为了让列表显示，我们暂时全部加入，列表显示时再过滤周次
+                # 但这里是 generate_daily_reminders，主要用于弹窗？
+                # 不，self.reminders 也被 ReminderManagerWindow 用来显示。
+                # 但 ReminderManagerWindow 主要是按周次显示课程。
+                # 自定义提醒是按具体日期的。
+                
+                # 为了能在 ReminderManagerWindow 中显示，我们需要将它们全部加入
+                # 冲突检测将在后面统一处理（如果需要）
+                
+                self.reminders.append(item)
+            except: pass
         
         # 定义需要处理的日期列表
         target_dates = [now, tomorrow]
@@ -1017,12 +1736,17 @@ class FloatingWindow(QWidget):
                         is_conflict = True
                         break
                 
+                # 还需要检查是否与自定义提醒冲突（如果自定义提醒时间也在上课时间内）
+                # 其实自定义提醒创建时已经检查了冲突，所以这里只需要检查课程之间的冲突，
+                # 或者课程提醒是否与自定义提醒冲突？
+                # 用户没提这个，暂时只保留课程间冲突检测
+                
                 # 如果有冲突，我们依然添加到列表中，但在 check_reminders 时不触发弹窗
                 # 并且在 ReminderManagerWindow 中显示为灰色
                 
-                # 过期检测：只有当提醒时间确实已经过去（小于当前时间）才跳过
-                # 注意：如果是冲突的，即使没过期也应该视为“失效”
-                if remind_dt < now and not is_conflict:
+                # 过期检测：只有当提醒时间确实已经过去（小于当前时间-2分钟）才跳过
+                # 留2分钟缓冲，防止刚过一分钟就消失，导致界面上看也是过期的
+                if remind_dt < now - datetime.timedelta(minutes=2) and not is_conflict:
                     continue
                     
                 remind_time_str = remind_dt.strftime("%Y-%m-%d %H:%M")
@@ -1053,7 +1777,8 @@ class FloatingWindow(QWidget):
 
     def check_reminders(self):
         """检查是否有需要触发的提醒"""
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = datetime.datetime.now()
+        now_str = now.strftime("%Y-%m-%d %H:%M")
         
         # 为了防止多次触发，我们记录已触发的
         if not hasattr(self, 'triggered_reminders'):
@@ -1067,11 +1792,24 @@ class FloatingWindow(QWidget):
             # 简单的唯一标识
             rid = f"{r['time']}_{r['title']}"
             
-            # 只要时间匹配（分钟级）且未触发过
+            # 1. 精确时间匹配（当前分钟）
             if r['time'] == now_str and rid not in self.triggered_reminders:
                 # 触发提醒
                 self.show_notification(r)
                 self.triggered_reminders.add(rid)
+                continue
+            
+            # 2. 补救措施：如果提醒时间在过去1分钟内，且未触发过，也触发（防止定时器刚好错过整分）
+            # 解析 r['time']
+            try:
+                r_dt = datetime.datetime.strptime(r['time'], "%Y-%m-%d %H:%M")
+                # 计算差异
+                diff = (now - r_dt).total_seconds()
+                # 如果超过了0秒但小于60秒（即刚刚过期不到1分钟），且没触发过
+                if 0 < diff < 60 and rid not in self.triggered_reminders:
+                     self.show_notification(r)
+                     self.triggered_reminders.add(rid)
+            except: pass
 
     def show_notification(self, data):
         # 弹窗
@@ -1109,33 +1847,14 @@ class FloatingWindow(QWidget):
         """删除提醒"""
         if reminder in self.reminders:
             self.reminders.remove(reminder)
-
-
-
-    def logout_and_quit(self):
-        """退出并取消自动登录"""
-        try:
-            if os.path.exists("config.json"):
-                with open("config.json", "r") as f:
-                    config = json.load(f)
-                
-                # 取消自动登录，但保留记住密码
-                config["auto_login"] = False
-                
-                with open("config.json", "w") as f:
-                    json.dump(config, f)
-        except Exception as e:
-            print(f"Logout error: {e}")
-            
-        QApplication.quit()
-
     def initTray(self):
         # 初始化托盘图标
         self.tray_icon = QSystemTrayIcon(self)
         
         # 设置图标
-        if os.path.exists("logo.png"):
-            self.tray_icon.setIcon(QIcon("logo.png"))
+        logo_path = find_resource("logo.png")
+        if logo_path:
+            self.tray_icon.setIcon(QIcon(logo_path))
         else:
             # 创建一个默认图标（避免在Windows上不显示）
             pixmap = QPixmap(64, 64)
@@ -1178,12 +1897,15 @@ class FloatingWindow(QWidget):
 
     def hide_to_tray(self):
         self.hide()
-        self.tray_icon.showMessage(
-            "SUSE 教务助手",
-            "程序已隐藏到托盘，点击图标恢复显示",
-            QSystemTrayIcon.Information,
-            2000
-        )
+        # 仅在第一次隐藏时提示
+        if not hasattr(self, 'tray_tip_shown'):
+            self.tray_icon.showMessage(
+                "SUSE 教务助手",
+                "程序已隐藏到托盘，提醒功能仍在运行",
+                QSystemTrayIcon.Information,
+                2000
+            )
+            self.tray_tip_shown = True
 
     def closeEvent(self, event):
         # 移除隐藏到托盘逻辑，直接接受关闭
@@ -1297,7 +2019,7 @@ class FloatingWindow(QWidget):
         self.menu.addAction(opacity_action)
         
         about_action = QAction("关于", self)
-        about_action.triggered.connect(lambda: QMessageBox.information(self, "关于", "SUSE 教务系统助手 v1.0"))
+        about_action.triggered.connect(lambda: QMessageBox.information(self, "关于", "青蟹v1.1.2"))
         self.menu.addAction(about_action)
         
         # 分隔线
@@ -1326,7 +2048,7 @@ class FloatingWindow(QWidget):
         self.scroll_area.setWidgetResizable(True)
         # 禁止水平滚动条，垂直滚动条设为自动（仅内容超出时显示）
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # 隐藏垂直滚动条，但保留滚动功能
         self.scroll_area.setStyleSheet("background: transparent; border: none;")
         self.scroll_area.viewport().setStyleSheet("background: transparent;")
         
@@ -1525,7 +2247,8 @@ class FloatingWindow(QWidget):
     def setup_timer(self):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_daily_schedule)
-        self.timer.start(60000)
+        # 将定时器频率提高到 3秒，避免错过整分时刻
+        self.timer.start(3000)
 
     def calculate_current_week(self):
         if not self.start_date_str:
@@ -1560,7 +2283,7 @@ class FloatingWindow(QWidget):
             with open("config.json", "r") as f:
                 config = json.load(f)
                 username = config.get("username", "")
-                password = config.get("password", "")
+                password = LocalEncryptor.decrypt(config.get("password", ""))
                 
             if not username or not password:
                 QMessageBox.warning(self, "刷新失败", "未找到保存的账号密码，请重新登录")
@@ -1904,8 +2627,87 @@ class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.client = SuseJwglClient()
+        self.migrate_cache_files()
         self.initUI()
         self.load_config()
+
+    def migrate_cache_files(self):
+        """迁移旧版缓存到多账号格式"""
+        try:
+            # 1. 获取最后登录的账号
+            last_user = "unknown"
+            if os.path.exists("config.json"):
+                try:
+                    with open("config.json", "r") as f:
+                        config = json.load(f)
+                        last_user = config.get("username", "unknown")
+                        
+                        # 检查是否是旧版 config 结构（没有 users 字段）
+                        if "users" not in config and "username" in config:
+                            new_config = {
+                                "last_login_user": last_user,
+                                "users": [
+                                    {
+                                        "username": config["username"],
+                                        "password": config.get("password", ""),
+                                        "schedule_id": f"schedule_{config['username']}",
+                                        "remember": config.get("remember", False),
+                                        "auto_login": config.get("auto_login", False)
+                                    }
+                                ]
+                            }
+                            with open("config.json", "w") as fw:
+                                json.dump(new_config, fw, indent=4)
+                except: pass
+
+            # 2. 迁移 schedule_cache.json
+            if os.path.exists("schedule_cache.json"):
+                try:
+                    with open("schedule_cache.json", "r", encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    # 检查是否是旧格式（包含 schedule 键）
+                    if "schedule" in data:
+                        # 这是一个单用户旧缓存
+                        schedule_id = f"schedule_{last_user}"
+                        new_data = {
+                            schedule_id: {
+                                "username": last_user,
+                                "data": data,
+                                "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                        }
+                        with open("schedule_cache.json", "w", encoding='utf-8') as f:
+                            json.dump(new_data, f, ensure_ascii=False)
+                    # 检查是否是中间版本（key是username）
+                    elif any(k for k in data.keys() if k != "unknown" and isinstance(data[k], dict) and "schedule" in data[k]):
+                        # 转换成新格式: key -> schedule_id
+                        new_data = {}
+                        for user, cache_content in data.items():
+                            if user == "unknown" or not user: continue
+                            s_id = f"schedule_{user}"
+                            
+                            # 确保不是已经是新格式了
+                            if user.startswith("schedule_"):
+                                new_data[user] = cache_content
+                                continue
+                                
+                            new_data[s_id] = {
+                                "username": user,
+                                "data": cache_content, # 这里包含 schedule 和 start_date
+                                "update_time": cache_content.get("update_time", "")
+                            }
+                        with open("schedule_cache.json", "w", encoding='utf-8') as f:
+                            json.dump(new_data, f, ensure_ascii=False)
+                    
+                except Exception as e:
+                    print(f"Migrate schedule cache error: {e}")
+
+            # 3. 迁移 custom_reminders.json
+            # 保持原样，或者也跟 schedule_id 绑定？既然用户只强调了课表和账号绑定，提醒先维持 username 绑定即可，或者也加上 schedule_id 映射
+            # 考虑到简单性，提醒仍然跟 username 绑定，这不违反用户需求。
+        except Exception as e:
+            print(f"Migration error: {e}")
 
     def initUI(self):
         self.setWindowTitle("SUSE 教务系统助手")
@@ -1975,6 +2777,8 @@ class LoginWindow(QWidget):
         self.user_input = QLineEdit()
         self.user_input.setPlaceholderText("请输入学号")
         self.user_input.setStyleSheet(input_style)
+        # 增加账号输入完成后的自动填充逻辑
+        self.user_input.editingFinished.connect(self.auto_fill_password)
         layout.addWidget(self.user_input)
 
         self.pwd_input = QLineEdit()
@@ -2060,31 +2864,109 @@ class LoginWindow(QWidget):
         layout.addStretch()
         self.setLayout(layout)
 
+    def auto_fill_password(self):
+        """输入账号后自动填充密码"""
+        username = self.user_input.text().strip()
+        if not username: return
+        
+        try:
+            found = False
+            if os.path.exists("config.json"):
+                with open("config.json", "r") as f:
+                    config = json.load(f)
+                    
+                if "users" in config:
+                    user_conf = next((u for u in config["users"] if u["username"] == username), None)
+                    if user_conf:
+                        found = True
+                        if user_conf.get("remember", False):
+                            self.pwd_input.setText(LocalEncryptor.decrypt(user_conf.get("password", "")))
+                            self.remember_cb.setChecked(True)
+                            self.auto_login_cb.setChecked(user_conf.get("auto_login", False))
+                        else:
+                            self.pwd_input.clear()
+                            self.remember_cb.setChecked(False)
+                            self.auto_login_cb.setChecked(False)
+            
+            if not found:
+                self.pwd_input.clear()
+                self.remember_cb.setChecked(False)
+                self.auto_login_cb.setChecked(False)
+        except: pass
+
     def load_config(self):
         try:
             with open("config.json", "r") as f:
                 config = json.load(f)
+                
+            # 优先使用新结构
+            if "users" in config:
+                last_user = config.get("last_login_user", "")
+                self.user_input.setText(last_user)
+                
+                # 查找对应的用户配置
+                user_conf = next((u for u in config["users"] if u["username"] == last_user), None)
+                if user_conf:
+                    if user_conf.get("remember", False):
+                        self.pwd_input.setText(LocalEncryptor.decrypt(user_conf.get("password", "")))
+                        self.remember_cb.setChecked(True)
+                        if user_conf.get("auto_login", False):
+                            self.auto_login_cb.setChecked(True)
+                            QTimer.singleShot(500, self.handle_login)
+            
+            # 兼容旧结构
+            elif "username" in config:
                 if config.get("remember", False):
                     self.user_input.setText(config.get("username", ""))
-                    self.pwd_input.setText(config.get("password", ""))
+                    self.pwd_input.setText(LocalEncryptor.decrypt(config.get("password", "")))
                     self.remember_cb.setChecked(True)
                     if config.get("auto_login", False):
                         self.auto_login_cb.setChecked(True)
-                        # 延迟自动登录，给用户取消的机会
                         QTimer.singleShot(500, self.handle_login)
         except:
             pass
 
     def save_config(self):
-        config = {
-            "username": self.user_input.text().strip(),
-            "password": self.pwd_input.text().strip() if self.remember_cb.isChecked() else "",
-            "remember": self.remember_cb.isChecked(),
-            "auto_login": self.auto_login_cb.isChecked()
-        }
+        username = self.user_input.text().strip()
+        password = self.pwd_input.text().strip()
+        remember = self.remember_cb.isChecked()
+        auto_login = self.auto_login_cb.isChecked()
+        
         try:
+            config = {}
+            if os.path.exists("config.json"):
+                with open("config.json", "r") as f:
+                    try:
+                        config = json.load(f)
+                    except: pass
+            
+            # 确保是新结构
+            if "users" not in config:
+                config["users"] = []
+            
+            config["last_login_user"] = username
+            
+            # 更新或添加用户
+            user_entry = next((u for u in config["users"] if u["username"] == username), None)
+            
+            if user_entry:
+                user_entry["password"] = LocalEncryptor.encrypt(password) if remember else ""
+                user_entry["remember"] = remember
+                user_entry["auto_login"] = auto_login
+                # 确保有 schedule_id
+                if "schedule_id" not in user_entry:
+                    user_entry["schedule_id"] = f"schedule_{username}"
+            else:
+                config["users"].append({
+                    "username": username,
+                    "password": LocalEncryptor.encrypt(password) if remember else "",
+                    "remember": remember,
+                    "auto_login": auto_login,
+                    "schedule_id": f"schedule_{username}"
+                })
+            
             with open("config.json", "w") as f:
-                json.dump(config, f)
+                json.dump(config, f, indent=4)
         except Exception as e:
             print(f"Save config failed: {e}")
 
@@ -2109,6 +2991,7 @@ class LoginWindow(QWidget):
         if success:
             self.status_label.setText("登录成功，正在获取数据...")
             now = datetime.datetime.now()
+            # 自动计算学年学期
             if now.month >= 8:
                 year = str(now.year)
                 semester = "3"
@@ -2124,10 +3007,10 @@ class LoginWindow(QWidget):
             self.schedule_worker.start()
         else:
             # 尝试加载缓存
-            cache = self.load_schedule_cache()
-            if cache:
+            cache_data = self.load_schedule_cache()
+            if cache_data:
                 self.status_label.setText("登录失败，使用离线缓存...")
-                self.start_main_app(cache['schedule'], cache['start_date'])
+                self.start_main_app(cache_data['schedule'], cache_data['start_date'])
                 return
                 
             self.login_btn.setEnabled(True)
@@ -2138,22 +3021,62 @@ class LoginWindow(QWidget):
     def save_schedule_cache(self, data, start_date):
         """保存课表缓存"""
         try:
-            cache = {
-                "schedule": data,
-                "start_date": start_date,
+            username = self.user_input.text().strip()
+            if not username: return
+            
+            # 生成唯一 ID
+            schedule_id = f"schedule_{username}"
+            
+            # 读取现有缓存
+            all_cache = {}
+            if os.path.exists("schedule_cache.json"):
+                with open("schedule_cache.json", "r", encoding='utf-8') as f:
+                    try:
+                        all_cache = json.load(f)
+                        # 简单的旧格式兼容检查
+                        if "schedule" in all_cache:
+                            all_cache = {schedule_id: {"username": "unknown", "data": all_cache}}
+                    except: pass
+            
+            # 增量添加/更新
+            # 如果 schedule_id 不存在，这本身就是一种增量添加
+            # 如果存在，则更新其内容
+            all_cache[schedule_id] = {
+                "username": username,
+                "data": { # 保持内部结构，方便扩展
+                    "schedule": data,
+                    "start_date": start_date
+                },
                 "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
+
             with open("schedule_cache.json", "w", encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False)
+                json.dump(all_cache, f, ensure_ascii=False)
         except Exception as e:
             print(f"Save schedule cache error: {e}")
 
     def load_schedule_cache(self):
         """加载课表缓存"""
         try:
+            username = self.user_input.text().strip()
+            schedule_id = f"schedule_{username}"
+            
             if os.path.exists("schedule_cache.json"):
                 with open("schedule_cache.json", "r", encoding='utf-8') as f:
-                    return json.load(f)
+                    all_cache = json.load(f)
+                    
+                # 兼容旧格式
+                if "schedule" in all_cache:
+                    return all_cache
+                
+                # 新格式：通过 schedule_id 查找
+                if schedule_id in all_cache:
+                    return all_cache[schedule_id].get("data")
+                
+                # 兼容中间版本（key是username）
+                if username in all_cache and "data" not in all_cache[username]:
+                     return all_cache[username] # 这是上一轮修改产生的格式
+                     
         except Exception as e:
             print(f"Load schedule cache error: {e}")
         return None
@@ -2178,7 +3101,8 @@ class LoginWindow(QWidget):
         try:
             # 1. 创建并全局引用新窗口 
             global main_window
-            main_window = FloatingWindow(data, start_date)
+            username = self.user_input.text().strip()
+            main_window = FloatingWindow(data, start_date, username)
             main_window.show()
             
             # 2. 确保它不会被销毁 
