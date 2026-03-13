@@ -16,3 +16,4 @@ ENV/
 .青蟹.spec/
 .json/
 # 如果有 UI 转出来的资源文件也可以忽略
+/config.json/

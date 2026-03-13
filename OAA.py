@@ -2019,7 +2019,7 @@ class FloatingWindow(QWidget):
         self.menu.addAction(opacity_action)
         
         about_action = QAction("关于", self)
-        about_action.triggered.connect(lambda: QMessageBox.information(self, "关于", "青蟹v1.1.3"))
+        about_action.triggered.connect(lambda: QMessageBox.information(self, "关于", "青蟹v1.1.5"))
         self.menu.addAction(about_action)
         
         # 分隔线
@@ -2087,11 +2087,18 @@ class FloatingWindow(QWidget):
                 with open("config.json", "r") as f:
                     config = json.load(f)
                 
-                # 取消自动登录，但保留记住密码
-                config["auto_login"] = False
+                # 新版多用户结构
+                if "users" in config and self.username:
+                    for user in config["users"]:
+                        if user["username"] == self.username:
+                            user["auto_login"] = False
+                            break
+                # 旧版结构兼容
+                else:
+                    config["auto_login"] = False
                 
                 with open("config.json", "w") as f:
-                    json.dump(config, f)
+                    json.dump(config, f, indent=4)
         except Exception as e:
             print(f"Logout error: {e}")
             
@@ -2280,13 +2287,24 @@ class FloatingWindow(QWidget):
     def refresh_from_server(self):
         """从服务器刷新课表"""
         try:
+            username = self.username
+            password = ""
+            
             with open("config.json", "r") as f:
                 config = json.load(f)
-                username = config.get("username", "")
-                password = LocalEncryptor.decrypt(config.get("password", ""))
+                
+            # 适配多用户结构
+            if "users" in config:
+                user_conf = next((u for u in config["users"] if u["username"] == username), None)
+                if user_conf:
+                    password = LocalEncryptor.decrypt(user_conf.get("password", ""))
+            else:
+                # 兼容旧结构
+                if config.get("username") == username:
+                    password = LocalEncryptor.decrypt(config.get("password", ""))
                 
             if not username or not password:
-                QMessageBox.warning(self, "刷新失败", "未找到保存的账号密码，请重新登录")
+                QMessageBox.warning(self, "刷新失败", "未找到当前账号的密码，请重新登录")
                 return
                 
             self.lock_btn.setEnabled(False) # 借用一下按钮状态表示正在刷新
@@ -2338,14 +2356,31 @@ class FloatingWindow(QWidget):
             
         # 保存缓存
         try:
-            cache = {
-                "schedule": data,
-                "start_date": self.start_date_str,
+            schedule_id = f"schedule_{self.username}"
+            all_cache = {}
+            if os.path.exists("schedule_cache.json"):
+                with open("schedule_cache.json", "r", encoding='utf-8') as f:
+                    try:
+                        all_cache = json.load(f)
+                        # 简单的旧格式兼容检查
+                        if "schedule" in all_cache:
+                            all_cache = {schedule_id: {"username": "unknown", "data": all_cache}}
+                    except: pass
+            
+            # 增量添加/更新
+            all_cache[schedule_id] = {
+                "username": self.username,
+                "data": { 
+                    "schedule": data,
+                    "start_date": self.start_date_str
+                },
                 "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
+
             with open("schedule_cache.json", "w", encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False)
-        except: pass
+                json.dump(all_cache, f, ensure_ascii=False)
+        except Exception as e: 
+            print(f"Save schedule cache error: {e}")
             
         # 重新计算周次并刷新界面
         self.current_week = self.calculate_current_week()
