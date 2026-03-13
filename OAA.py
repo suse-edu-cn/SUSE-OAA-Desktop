@@ -2019,7 +2019,7 @@ class FloatingWindow(QWidget):
         self.menu.addAction(opacity_action)
         
         about_action = QAction("关于", self)
-        about_action.triggered.connect(lambda: QMessageBox.information(self, "关于", "青蟹v1.1.2"))
+        about_action.triggered.connect(lambda: QMessageBox.information(self, "关于", "青蟹v1.1.3"))
         self.menu.addAction(about_action)
         
         # 分隔线
